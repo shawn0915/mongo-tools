@@ -9,6 +9,7 @@ package mongostat
 
 import (
 	"fmt"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -233,11 +234,15 @@ func (cluster *AsyncClusterMonitor) Monitor(sleep time.Duration) error {
 func NewNodeMonitor(opts options.ToolOptions, fullHost string) (*NodeMonitor, error) {
 	optsCopy := opts
 	host, port := parseHostPort(fullHost)
-	optsCopy.Connection = &options.Connection{
-		Host:    host,
-		Port:    port,
-		Timeout: opts.Timeout,
+	optsCopy.Connection.Host = host
+	optsCopy.Connection.Port = port
+	uriCopy := *opts.URI
+	newCS, err := rewriteURI(uriCopy.ConnectionString, fullHost)
+	if err != nil {
+		return nil, err
 	}
+	uriCopy.ConnectionString = newCS
+	optsCopy.URI = &uriCopy
 	optsCopy.Direct = true
 	sessionProvider, err := db.NewSessionProvider(optsCopy)
 	if err != nil {
@@ -249,6 +254,19 @@ func NewNodeMonitor(opts options.ToolOptions, fullHost string) (*NodeMonitor, er
 		LastUpdate:      time.Now(),
 		Err:             nil,
 	}, nil
+}
+
+func rewriteURI(oldURI, newAddress string) (string, error) {
+	u, err := url.Parse(oldURI)
+	if err != nil {
+		return "", err
+	}
+	u.Host = newAddress
+	return u.String(), nil
+}
+
+func (node *NodeMonitor) Disconnect() {
+	node.sessionProvider.Close()
 }
 
 // Report collects the stat info for a single node and sends found hostnames on
@@ -264,12 +282,27 @@ func (node *NodeMonitor) Poll(discover chan string, checkShards bool) (*status.S
 	log.Logvf(log.DebugHigh, "got session on server: %v", node.host)
 
 	result := session.Database("admin").RunCommand(nil, bson.D{{"serverStatus", 1}, {"recordStats", 0}})
-	if result.Err() != nil {
+	err = result.Err()
+	if err != nil {
 		log.Logvf(log.DebugLow, "got error calling serverStatus against server %v", node.host)
 		return nil, err
 	}
+	tempBson, err := result.DecodeBytes()
+	if err != nil {
+		log.Logvf(log.Always, "Encountered error decoding serverStatus: %v\n", err)
+		return nil, fmt.Errorf("Error decoding serverStatus: %v\n", err)
+	}
+	err = bson.Unmarshal(tempBson, &stat)
+	if err != nil {
+		log.Logvf(log.Always, "Encountered error reading serverStatus: %v\n", err)
+		return nil, fmt.Errorf("Error reading serverStatus: %v\n", err)
+	}
+	// The flattened version is required by some lookup functions
 	statMap := make(map[string]interface{})
-	result.Decode(statMap)
+	err = result.Decode(&statMap)
+	if err != nil {
+		return nil, fmt.Errorf("Error flattening serverStatus: %v\n", err)
+	}
 	stat.Flattened = status.Flatten(statMap)
 
 	node.Err = nil
@@ -293,7 +326,7 @@ func (node *NodeMonitor) Poll(discover chan string, checkShards bool) (*status.S
 		}
 		shard := ConfigShard{}
 		for shardCursor.Next(nil) {
-			if cursorErr := shardCursor.Decode(shard); cursorErr != nil {
+			if cursorErr := shardCursor.Decode(&shard); cursorErr != nil {
 				return nil, fmt.Errorf("error decoding shard info: %v", err)
 			}
 			shardHosts := strings.Split(shard.Host, ",")

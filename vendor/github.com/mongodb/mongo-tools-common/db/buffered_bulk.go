@@ -10,9 +10,9 @@ import (
 	"context"
 	"fmt"
 
-	gbson "github.com/mongodb/mongo-go-driver/bson"
-	"github.com/mongodb/mongo-go-driver/mongo"
-	mopt "github.com/mongodb/mongo-go-driver/mongo/options"
+	gbson "go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/mongo"
+	mopt "go.mongodb.org/mongo-driver/mongo/options"
 	"gopkg.in/mgo.v2/bson"
 )
 
@@ -21,22 +21,21 @@ import (
 // message size) is reached. Must be flushed at the end to ensure that all
 // documents are written.
 type BufferedBulkInserter struct {
-	collection      *mongo.Collection
-	documents       []interface{}
-	continueOnError bool
-	docLimit        int
-	byteCount       int
-	docCount        int
-	unordered       bool
+	collection               *mongo.Collection
+	documents                []interface{}
+	docLimit                 int
+	byteCount                int
+	docCount                 int
+	unordered                bool
+	bypassDocumentValidation bool
 }
 
 // NewBufferedBulkInserter returns an initialized BufferedBulkInserter
 // for writing.
-func NewBufferedBulkInserter(collection *mongo.Collection, docLimit int,
-	continueOnError bool) *BufferedBulkInserter {
+func NewBufferedBulkInserter(collection *mongo.Collection, docLimit int, unordered bool) *BufferedBulkInserter {
 	bb := &BufferedBulkInserter{
 		collection:      collection,
-		continueOnError: continueOnError,
+		unordered:       unordered,
 		docLimit:        docLimit,
 	}
 	bb.resetBulk()
@@ -45,6 +44,10 @@ func NewBufferedBulkInserter(collection *mongo.Collection, docLimit int,
 
 func (bb *BufferedBulkInserter) Unordered() {
 	bb.unordered = true
+}
+
+func (bb *BufferedBulkInserter) SetBypassDocumentValidation(bypass bool) {
+	bb.bypassDocumentValidation = bypass
 }
 
 // throw away the old bulk and init a new one
@@ -61,6 +64,13 @@ func (bb *BufferedBulkInserter) Insert(doc interface{}) error {
 	if err != nil {
 		return fmt.Errorf("bson encoding error: %v", err)
 	}
+
+	return bb.InsertRaw(rawBytes)
+}
+
+// InsertRaw adds a document, represented as raw bson bytes, to the buffer for bulk insertion. If the buffer is full,
+// the bulk insert is made, returning any error that occurs.
+func (bb *BufferedBulkInserter) InsertRaw(rawBytes []byte) (err error) {
 	// flush if we are full
 	//
 	// XXX With OP_MSG the limit is larger; MaxBSONSize shouldn't be hard
@@ -81,6 +91,7 @@ func (bb *BufferedBulkInserter) Flush() error {
 		return nil
 	}
 	defer bb.resetBulk()
-	_, err := bb.collection.InsertMany(context.Background(), bb.documents, mopt.InsertMany().SetOrdered(!bb.unordered))
+	insertOpts := mopt.InsertMany().SetOrdered(!bb.unordered).SetBypassDocumentValidation(bb.bypassDocumentValidation)
+	_, err := bb.collection.InsertMany(context.Background(), bb.documents, insertOpts)
 	return err
 }

@@ -10,8 +10,6 @@ package mongodump
 import (
 	"context"
 
-	"github.com/mongodb/mongo-go-driver/mongo"
-	"github.com/mongodb/mongo-go-driver/mongo/readpref"
 	"github.com/mongodb/mongo-tools-common/archive"
 	"github.com/mongodb/mongo-tools-common/auth"
 	"github.com/mongodb/mongo-tools-common/bsonutil"
@@ -23,6 +21,8 @@ import (
 	"github.com/mongodb/mongo-tools-common/options"
 	"github.com/mongodb/mongo-tools-common/progress"
 	"github.com/mongodb/mongo-tools-common/util"
+	"go.mongodb.org/mongo-driver/mongo"
+	"go.mongodb.org/mongo-driver/mongo/readpref"
 	"gopkg.in/mgo.v2/bson"
 
 	"bufio"
@@ -111,10 +111,6 @@ func (dump *MongoDump) ValidateOptions() error {
 		return fmt.Errorf("--db is required when --excludeCollection is specified")
 	case len(dump.OutputOptions.ExcludedCollectionPrefixes) > 0 && dump.ToolOptions.Namespace.DB == "":
 		return fmt.Errorf("--db is required when --excludeCollectionsWithPrefix is specified")
-	case dump.OutputOptions.Repair && dump.InputOptions.Query != "":
-		return fmt.Errorf("cannot run a query with --repair enabled")
-	case dump.OutputOptions.Repair && dump.InputOptions.QueryFile != "":
-		return fmt.Errorf("cannot run a queryFile with --repair enabled")
 	case dump.OutputOptions.Out != "" && dump.OutputOptions.Archive != "":
 		return fmt.Errorf("--out not allowed when --archive is specified")
 	case dump.OutputOptions.Out == "-" && dump.OutputOptions.Gzip:
@@ -165,11 +161,6 @@ func (dump *MongoDump) Init() error {
 	// warn if we are trying to dump from a secondary in a sharded cluster
 	if dump.isMongos && pref != readpref.Primary() {
 		log.Logvf(log.Always, db.WarningNonPrimaryMongosConnection)
-	}
-
-	// return a helpful error message for mongos --repair
-	if dump.OutputOptions.Repair && dump.isMongos {
-		return fmt.Errorf("--repair flag cannot be used on a mongos")
 	}
 
 	dump.manager = intents.NewIntentManager()
@@ -288,22 +279,6 @@ func (dump *MongoDump) Dump() (err error) {
 		err = dump.CreateUsersRolesVersionIntentsForDB(dump.ToolOptions.DB)
 		if err != nil {
 			return err
-		}
-	}
-
-	// verify we can use repair cursors
-	if dump.OutputOptions.Repair {
-		log.Logv(log.DebugLow, "verifying that the connected server supports repairCursor")
-		if dump.isMongos {
-			return fmt.Errorf("cannot use --repair on mongos")
-		}
-		exampleIntent := dump.manager.Peek()
-		if exampleIntent != nil {
-			supported, err := dump.SessionProvider.SupportsRepairCursor(
-				exampleIntent.DB, exampleIntent.C)
-			if !supported {
-				return err // no extra context needed
-			}
 		}
 	}
 
@@ -536,7 +511,7 @@ func (dump *MongoDump) DumpIntent(intent *intents.Intent, buffer resettableOutpu
 		// Views have an implied aggregation which does not support snapshot.
 		// These are all a no-op.
 	default:
-		findQuery.Hint = "_id_"
+		findQuery.Hint = bson.D{{"_id", 1}}
 	}
 
 	var dumpCount int64
@@ -560,29 +535,9 @@ func (dump *MongoDump) DumpIntent(intent *intents.Intent, buffer resettableOutpu
 		}
 	}
 
-	if !dump.OutputOptions.Repair {
-		log.Logvf(log.Always, "writing %v to %v", intent.Namespace(), intent.Location)
-		if dumpCount, err = dump.dumpQueryToIntent(findQuery, intent, buffer); err != nil {
-			return err
-		}
-	} else {
-		// handle repairs as a special case, since we cannot count them
-		log.Logvf(log.Always, "writing repair of %v to %v", intent.Namespace(), intent.Location)
-		// XXX Have to fake Repair until we have an equivalent
-		// -- xdg, 2018-09-19
-		// 		repairIter := session.Database(intent.DB).Collection(intent.C).Repair()
-		repairIter, err := session.Database(intent.DB).Collection(intent.C).Find(nil, nil)
-		defer repairIter.Close(context.Background())
-		if err != nil {
-			return err
-		}
-		repairCounter := progress.NewCounter(1) // this counter is ignored
-		if err := dump.dumpIterToWriter(repairIter, buffer, repairCounter); err != nil {
-			return fmt.Errorf("repair error: %v", err)
-		}
-		_, repairCount := repairCounter.Progress()
-		log.Logvf(log.Always, "\trepair cursor found %v %v in %v",
-			repairCount, docPlural(repairCount), intent.Namespace())
+	log.Logvf(log.Always, "writing %v to %v", intent.Namespace(), intent.Location)
+	if dumpCount, err = dump.dumpQueryToIntent(findQuery, intent, buffer); err != nil {
+		return err
 	}
 
 	log.Logvf(log.Always, "done dumping %v (%v %v)", intent.Namespace(), dumpCount, docPlural(dumpCount))
@@ -673,14 +628,14 @@ func (dump *MongoDump) dumpFilteredQueryToIntent(
 // dumpIterToWriter takes an mgo iterator, a writer, and a pointer to
 // a counter, and dumps the iterator's contents to the writer.
 func (dump *MongoDump) dumpIterToWriter(
-	iter mongo.Cursor, writer io.Writer, progressCount progress.Updateable) error {
+	iter *mongo.Cursor, writer io.Writer, progressCount progress.Updateable) error {
 	return dump.dumpFilteredIterToWriter(iter, writer, progressCount, copyDocumentFilter)
 }
 
 // dumpFilteredIterToWriter takes an mgo iterator, a writer, and a pointer to
 // a counter, and filters and dumps the iterator's contents to the writer.
 func (dump *MongoDump) dumpFilteredIterToWriter(
-	iter mongo.Cursor, writer io.Writer, progressCount progress.Updateable, filter documentFilter) error {
+	iter *mongo.Cursor, writer io.Writer, progressCount progress.Updateable, filter documentFilter) error {
 	defer iter.Close(context.Background())
 	var termErr error
 
@@ -705,13 +660,8 @@ func (dump *MongoDump) dumpFilteredIterToWriter(
 					close(buffChan)
 					return
 				}
-				reader, err := iter.DecodeBytes()
-				if err != nil {
-					termErr = err
-					close(buffChan)
-					return
-				}
-				out, err := filter(reader)
+
+				out, err := filter(iter.Current)
 				if err != nil {
 					termErr = err
 					close(buffChan)

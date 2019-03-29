@@ -1,8 +1,8 @@
 package db
 
 import (
-	"github.com/mongodb/mongo-go-driver/mongo"
-	mopt "github.com/mongodb/mongo-go-driver/mongo/options"
+	"go.mongodb.org/mongo-driver/mongo"
+	mopt "go.mongodb.org/mongo-driver/mongo/options"
 	"gopkg.in/mgo.v2/bson"
 )
 
@@ -14,11 +14,10 @@ type DeferredQuery struct {
 	LogReplay bool
 }
 
+// Count issues a count command. We don't use the Hint because
+// that's not supported with older servers.
 func (q *DeferredQuery) Count() (int, error) {
 	opt := mopt.Count()
-	if q.Hint != nil {
-		opt.SetHint(q.Hint)
-	}
 	filter := q.Filter
 	if filter == nil {
 		filter = bson.D{}
@@ -27,7 +26,7 @@ func (q *DeferredQuery) Count() (int, error) {
 	return int(c), err
 }
 
-func (q *DeferredQuery) Iter() (mongo.Cursor, error) {
+func (q *DeferredQuery) Iter() (*mongo.Cursor, error) {
 	opts := mopt.Find()
 	if q.Hint != nil {
 		opts.SetHint(q.Hint)
@@ -40,9 +39,4 @@ func (q *DeferredQuery) Iter() (mongo.Cursor, error) {
 		filter = bson.D{}
 	}
 	return q.Coll.Find(nil, filter, opts)
-}
-
-// XXX temporary fix; fake a Repair via regular cursor
-func (q *DeferredQuery) Repair() (mongo.Cursor, error) {
-	return q.Iter()
 }

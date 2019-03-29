@@ -295,6 +295,7 @@ mongo_tools_variables:
       mongod_port: 33333
 
 functions:
+
   "run legacy tests":
     command: shell.exec
     type: test
@@ -350,7 +351,7 @@ functions:
         GOROOT="" set_goenv || exit
         go version
         env | grep ^GO
-        go build -ldflags "$(print_ldflags)" ${args} -tags "$(print_tags failpoints ${build_tags})" -o bin/${tool} ${tool}/main/${tool}.go
+        go build $(buildflags) -ldflags "$(print_ldflags)" ${args} -tags "$(print_tags failpoints ${build_tags})" -o bin/${tool} ${tool}/main/${tool}.go
         ./bin/${tool} --version
 
   "download mongod":
@@ -440,7 +441,7 @@ functions:
         . ./set_goenv.sh
         GOROOT="" set_goenv || exit
         cd ${package}
-        go test -ldflags "$(print_ldflags)" ${coverage_args} -tags "$(print_tags ${build_tags})" -test.v > unit.suite
+        go test $(buildflags) -ldflags "$(print_ldflags)" ${coverage_args} -tags "$(print_tags ${build_tags})" -test.v > unit.suite
         export exitcode=$?
         cat unit.suite
         cp unit.suite $basedir/.
@@ -806,7 +807,7 @@ functions:
         if [ "${TESTING_REPLAY}" = "true" ]; then
             export TOOLS_TESTING_REPLAY="true"
         fi
-        ${environment_vars} go test -ldflags "$(print_ldflags)" ${additional_args} -v > ${filename}.suite
+        ${environment_vars} go test $(buildflags) -ldflags "$(print_ldflags)" ${additional_args} -v > ${filename}.suite
 
 
 pre:
@@ -821,20 +822,21 @@ pre:
         exit 0
 
 post:
+    # attach.results works for jstests, gotest.parse_files for golang tests
   - command: attach.results
     params:
       file_location: src/github.com/mongodb/mongo-tools/report.json
+  - command: gotest.parse_files
+    params:
+      files: ["src/github.com/mongodb/mongo-tools/testing_output/*.suite"]
   - command: shell.exec
     params:
       silent: true
       script: |
         set -x
-          set -v
+        set -v
         ${killall_mci|pkill -9 mongo; pkill -9 mongodump; pkill -9 mongoexport; pkill -9 mongoimport; pkill -9 mongofiles; pkill -9 mongorestore; pkill -9 mongostat; pkill -9 mongotop; pkill -9 mongod; pkill -9 mongos; pkill -f buildlogger.py; pkill -f smoke.py} >/dev/null 2>&1
         exit 0
-  - command: gotest.parse_files
-    params:
-      files: ["src/github.com/mongodb/mongo-tools/*.suite"]
   - command: shell.exec
     params:
       script: |
@@ -2107,7 +2109,7 @@ buildvariants:
     mongo_edition: "enterprise"
     build_tags: "sasl ssl"
     arch: "linux/x86_64"
-    args: "-race"
+    args: "-buildmode=default -race"
     excludes: requires_large_ram
     integration_test_args: integration
   tasks: *ubuntu_x86_64_race_tasks

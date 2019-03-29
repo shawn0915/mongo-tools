@@ -9,8 +9,12 @@ package util
 import (
 	"bufio"
 	"io"
+	"net/url"
 	"os"
 	"path/filepath"
+	"context"
+
+	"go.mongodb.org/mongo-driver/mongo"
 )
 
 // GetFieldsFromFile fetches the first line from the contents of the file
@@ -40,6 +44,14 @@ func ToUniversalPath(path string) string {
 	return filepath.FromSlash(path)
 }
 
+func EscapeCollectionName(collName string) string {
+	return url.PathEscape(collName)
+}
+
+func UnescapeCollectionName(escapedCollName string) (string, error) {
+	return url.PathUnescape(escapedCollName)
+}
+
 type WrappedReadCloser struct {
 	io.ReadCloser
 	Inner io.ReadCloser
@@ -66,4 +78,34 @@ func (wwc *WrappedWriteCloser) Close() error {
 		return outerErr
 	}
 	return innerErr
+}
+
+
+// Wrapper that can capture errors that occur when closing the underlying closer.
+type DeferredCloser struct {
+	io.Closer
+	closed bool
+}
+
+// CloseWithErrorCapture closes the wrapped Closer and sets deferredErr to the error if one occurs.
+// It will only assign an error deferredErr's pointee is nil and if the underlying Closer has not been closed yet.
+func (dc *DeferredCloser) CloseWithErrorCapture(deferredErr *error) {
+	if dc.closed {
+		return
+	}
+
+	err := dc.Closer.Close()
+	dc.closed = true
+	if err != nil && *deferredErr == nil {
+		*deferredErr = err
+	}
+}
+
+// Wrapper around Cursor to implement Closer
+type CloserCursor struct {
+	*mongo.Cursor
+}
+
+func (cursor *CloserCursor) Close() error {
+	return cursor.Cursor.Close(context.Background())
 }
